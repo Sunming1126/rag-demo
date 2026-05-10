@@ -1,0 +1,17 @@
+# RAG Demo 依赖包
+# 安装命令: pip install -r requirements.txt
+
+# 句子转换库，用于将文本转为向量
+sentence-transformers>=2.2.0
+
+# 向量数据库1: ChromaDB (最简单易用)
+chromadb>=0.4.0
+
+# 向量数据库2: FAISS (Meta开源，高性能)
+faiss-cpu>=1.7.4
+
+# 向量数据库3: Milvus Lite (轻量版，无需服务器)
+pymilvus>=2.3.0
+
+# 科学计算库，用于自己实现向量数据库
+numpy>=1.24.0
