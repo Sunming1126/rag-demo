@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+
+# 向量数据库持久化文件
+*.db
+chroma_data/
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# SSH 密钥 - 切勿提交私钥！
+ssh-keygen*
+
+# Milvus Lite 数据
+milvus_demo.db

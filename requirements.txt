@@ -11,6 +11,8 @@ chromadb>=0.4.0
 faiss-cpu>=1.7.4
 
 # 向量数据库3: Milvus Lite (轻量版，无需服务器)
+# 注意: pymilvus>=3.0 后需安装 milvus_lite 扩展:
+#   pip install "pymilvus[milvus_lite]"
 pymilvus>=2.3.0
 
 # 科学计算库，用于自己实现向量数据库

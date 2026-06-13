@@ -1,305 +1,405 @@
 """
-RAG (检索增强生成) 完整演示
+🦜 RAG (检索增强生成) 学习演示 - 主程序
 
-这个文件整合了三种向量数据库，展示完整的RAG流程
+├── 📂 步骤 1: 数据加载  (MarkdownLoader → data_loader.py)
+├── ✂️  步骤 2: 文本切分  (RecursiveCharacterTextSplitter → text_splitter.py)
+├── 🔢 步骤 3: 向量嵌入  (SentenceTransformer → 384维向量)
+├── 💾 步骤 4: 向量存储  (SimpleVectorDB / ChromaDB / FAISS / Milvus)
+├── 🔍 步骤 5: 相似度检索 (余弦相似度 / L2距离)
+└── 💬 步骤 6: 生成回答  (结合检索结果 + LLM)
 
-RAG 工作原理：
-1. 准备知识库：把文档切分成小块，转换成向量存储
-2. 检索：用户提问时，找到最相关的文档块
-3. 生成：把相关文档和问题一起发给大模型生成答案
+运行:
+    python rag_main.py
 
-向量数据库对比：
-┌─────────────┬─────────────┬─────────────┬─────────────┐
-│   特性       │ ChromaDB    │ FAISS       │ Milvus Lite │
-├─────────────┼─────────────┼─────────────┼─────────────┤
-│ 易用性       │ ⭐⭐⭐⭐⭐ │ ⭐⭐⭐     │ ⭐⭐⭐⭐   │
-│ 性能         │ ⭐⭐⭐     │ ⭐⭐⭐⭐⭐ │ ⭐⭐⭐⭐   │
-│ 功能丰富度   │ ⭐⭐⭐     │ ⭐⭐       │ ⭐⭐⭐⭐⭐ │
-│ 适用场景     │ 原型开发     │ 大规模检索   │ 生产环境    │
-│ 是否需要服务器│ 否         │ 否          │ Lite版不需要 │
-└─────────────┴─────────────┴─────────────┴─────────────┘
+学习建议:
+    1. 先运行一次，观察输出
+    2. 修改 chunk_size 和 chunk_overlap，看检索效果变化
+    3. 替换 data/ 目录下的 .md 文件，使用自己的知识库
+    4. 对比不同向量数据库的检索效果
 """
 
-import os  # 操作系统相关功能
-from sentence_transformers import SentenceTransformer  # embedding模型
+import sys
+import os
 
-# 导入三种向量数据库
-from simple_vector_db import SimpleVectorDB
-from chromadb_demo import ChromaDBDemo
-from faiss_demo import FAISSDemo
+# 确保可以导入当前目录下的模块
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from data_loader import MarkdownLoader
+from text_splitter import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+import numpy as np
 
 
-def print_separator(title: str):
-    """打印分隔线，美化输出"""
+# ═══════════════════════════════════════════════════════════════
+#  步骤 2: 文本切分演示
+# ═══════════════════════════════════════════════════════════════
+
+def step2_split_documents(documents):
+    """
+    ✂️  文本切分 (Chunking) — RAG 流程中最关键的环节
+
+    用递归字符分割器将长文档切分为适合检索的文本块。
+
+    为什么 chunk_size 选 512?
+        - 对中文来说 512 字符 ≈ 200-300 个有意义的中文词
+        - 嵌入模型的输入限制通常是 512 tokens (约 700+ 中文字符)
+        - 这个大小刚好容纳 1-2 个 QA 对
+
+    为什么 overlap 选 128?
+        - 128/512 = 25% 的重叠率
+        - 假设一段文本在「。」处被切断:
+          "...A。|B..." → 块1 以 A。结尾，块2 以 B... 开头
+          → 查询「A 的影响」可能找不到块2
+        - 有了 overlap:
+          "...A。|B..." → 块1 以 A。结尾，块2 以 。B... 开头
+          → 两个块都包含 A 的信息
+    """
     print("\n" + "=" * 60)
-    print(f"  {title}")
+    print("✂️  步骤 2: 文本切分 (Text Chunking)")
     print("=" * 60)
 
+    # ── 创建递归分割器 ──
+    # 这两个参数对检索效果影响最大，建议多尝试不同组合:
+    #   chunk_size:  [256, 512, 1024]
+    #   chunk_overlap: [0, 64, 128, 256]
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=512,
+        chunk_overlap=128,
+    )
 
-def load_sample_documents() -> list:
+    print(f"\n📐  分割器配置:")
+    print(f"     chunk_size    = {splitter.chunk_size} 字符")
+    print(f"     chunk_overlap = {splitter.chunk_overlap} 字符")
+    print(f"     分隔符优先级  :")
+    for i, sep in enumerate(splitter.separators):
+        display = repr(sep) if sep else "'' (字符级 fallback)"
+        print(f"       {i+1:2d}. {display}")
+
+    # ── 对每个文档进行切分 ──
+    all_chunks = []  # [{"source": "xxx.md", "chunks": ["...", "..."]}, ...]
+
+    for doc in documents:
+        chunks = splitter.split_text(doc["content"])
+        all_chunks.append({
+            "source": doc["filename"],
+            "chunks": chunks,
+        })
+
+        # 打印切分统计
+        print(f"\n📄  [{doc['filename']}]")
+        print(f"    原始: {doc['length']:>6,} 字符 → 切分为 {len(chunks):>3} 个块")
+
+        # 如果块数 > 0，显示前 3 个块的预览
+        if chunks:
+            n_preview = min(3, len(chunks))
+            print(f"    前 {n_preview} 个块预览:")
+            for i, chunk in enumerate(chunks[:n_preview]):
+                preview = chunk[:120].replace("\n", "↵ ")
+                if len(chunk) > 120:
+                    preview += "..."
+                print(f"      ── 块 #{i+1} (len={len(chunk):>3}) ── {preview}")
+
+        if len(chunks) > 3:
+            print(f"      ... 还有 {len(chunks) - 3} 个块未显示")
+
+    return all_chunks
+
+
+# ═══════════════════════════════════════════════════════════════
+#  步骤 3-5: 嵌入 + 存储 + 检索
+# ═══════════════════════════════════════════════════════════════
+
+def step3_5_embed_and_search(all_chunks, model):
     """
-    加载示例文档
-    
-    这些文档模拟一个简单的知识库
-    实际应用中，这些来自PDF、网页等
+    嵌入式 → 向量存储 → 相似度检索 (三位一体演示)
+
+    这是 RAG 的「检索」核心:
+        1. 每个文本块 → 384 维向量 (嵌入)
+        2. 向量存入数据库
+        3. 用户查询 → 同样转为向量 → 搜索最近邻
     """
-    documents = [
-        # Python相关
-        "Python是一种高级编程语言，由Guido van Rossum于1991年创建。Python的设计哲学强调代码的可读性和简洁性。",
-        "Python支持多种编程范式，包括面向对象、函数式和过程式编程。它拥有丰富的标准库和第三方库。",
-        "Python常用的库包括NumPy（数值计算）、Pandas（数据分析）、Matplotlib（数据可视化）等。",
-        
-        # 机器学习相关
-        "机器学习是人工智能的一个分支，它让计算机能够从数据中学习，而不需要明确编程。",
-        "机器学习主要分为三类：监督学习（有标签数据）、无监督学习（无标签数据）和强化学习（通过奖励学习）。",
-        "常用的机器学习算法包括：线性回归、决策树、随机森林、支持向量机（SVM）、K近邻（KNN）等。",
-        
-        # 深度学习相关
-        "深度学习是机器学习的一个子领域，使用多层神经网络来学习数据的复杂模式。",
-        "常见的深度学习框架有TensorFlow（Google开发）、PyTorch（Facebook开发）和Keras（高级API）。",
-        "深度学习的典型应用包括：图像识别、语音识别、自然语言处理和游戏AI等。",
-        
-        # 向量数据库相关
-        "向量数据库是专门用于存储和检索高维向量的数据库，常用于AI应用中的相似性搜索。",
-        "向量数据库的核心技术是近似最近邻搜索（ANN），它能够在海量向量中快速找到最相似的向量。",
-        "常见的向量数据库包括：ChromaDB、FAISS、Milvus、Pinecone、Weaviate等。",
-        
-        # RAG相关
-        "RAG（检索增强生成）是一种结合检索和生成的技术，能够提高大语言模型的回答准确性。",
-        "RAG的工作流程：首先将文档切分成小块并转换为向量，然后检索相关文档块，最后将这些文档块和问题一起输入大模型。",
-        "RAG的优势在于：减少幻觉（hallucination）、知识可更新、可追溯来源。",
+    print("\n" + "=" * 60)
+    print("🔢  步骤 3-5: 嵌入 → 存储 → 检索")
+    print("=" * 60)
+
+    # ── 展平所有块 ──
+    texts = []
+    sources = []
+    for doc_chunks in all_chunks:
+        for chunk in doc_chunks["chunks"]:
+            texts.append(chunk)
+            sources.append(doc_chunks["source"])
+
+    print(f"\n📊  共 {len(texts)} 个文本块")
+
+    # ── 步骤 3: 生成嵌入向量 ──
+    # 嵌入模型: paraphrase-multilingual-MiniLM-L12-v2
+    #   - 多语言模型，支持中英文
+    #   - 输出 384 维向量
+    #   - MiniLM 架构，轻量快速
+    print(f"\n⏳  生成嵌入向量...")
+    print(f"     模型: {model._first_module().auto_model.config._name_or_path}")
+    print(f"     输出维度: {model.get_embedding_dimension()}")
+
+    embeddings = model.encode(texts, show_progress_bar=True)
+    print(f"   ✅ 嵌入完成! 形状: {embeddings.shape}")
+
+    # ── 步骤 4: 存入 SimpleVectorDB ──
+    # 使用教学级的 SimpleVectorDB (简单的余弦相似度 + 暴力搜索)
+    # 也可以换成 ChromaDB / FAISS / Milvus (见其他 demo 文件)
+    from simple_vector_db import SimpleVectorDB
+
+    print(f"\n💾  存储到 SimpleVectorDB ...")
+    vector_db = SimpleVectorDB()
+    for i, (text, embedding) in enumerate(zip(texts, embeddings)):
+        vector_db.add(text, embedding)
+    print(f"   ✅ 已存储 {vector_db.count()} 个向量")
+
+    # ── 步骤 5: 检索演示 ──
+    print(f"\n{'=' * 60}")
+    print(f"🔍  步骤 5: 相似度检索演示")
+    print(f"{'=' * 60}")
+
+    # 准备几个测试查询
+    test_queries = [
+        "工作流和对话流有什么区别？",
+        "如何提升提示词质量？",
+        "怎么减少AI回答的幻觉？",
+        "向量数据库有哪些类型？",
+        "什么是RAG？",
     ]
-    
-    return documents
+
+    for query in test_queries:
+        # 将查询转为向量
+        query_vec = model.encode(query)
+
+        # 在向量数据库中搜索 top-3 最相似的块
+        results = vector_db.search(query_vec, top_k=3)
+
+        print(f"\n{'─' * 55}")
+        print(f"  ❓ 查询: 「{query}」")
+        print(f"{'─' * 55}")
+
+        for rank, (doc_id, text, score) in enumerate(results, 1):
+            # 截断过长的文本
+            display_text = text[:250].replace("\n", "↵ ")
+            if len(text) > 250:
+                display_text += "..."
+
+            print(f"  #{rank}  [来自 {sources[doc_id]}]  相似度: {score:.4f}")
+            print(f"     {display_text}")
+            print()
+
+    return vector_db, texts, sources
 
 
-def demo_with_simple_db(documents: list):
+# ═══════════════════════════════════════════════════════════════
+#  [可选] 步骤 6: 简单生成回答
+# ═══════════════════════════════════════════════════════════════
+
+def step6_generate(vector_db, texts, sources, model, query: str, top_k: int = 3):
     """
-    使用简易向量数据库的RAG演示
-    
-    这个演示帮助理解RAG的基本原理
+    💬  步骤 6: 生成回答 (Generation)
+
+    这是完整的 RAG 最后一步:
+        检索到的文本块 → 拼成上下文 → 交给 LLM → 生成答案
+
+    注意: 这里用简单的「拼接 + 规则生成」模拟 LLM 输出。
+    实际生产环境中会调用真正的 LLM API (如 Claude、GPT 等)。
     """
-    print_separator("简易向量数据库 RAG 演示")
-    
-    # 创建简易数据库实例
-    db = SimpleVectorDB()
-    
-    # 加载embedding模型
-    print("\n[1/4] 加载embedding模型...")
-    model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
-    
-    # 将文档转换为向量并存储
-    print("[2/4] 将文档转换为向量并存储...")
-    embeddings = model.encode(documents)
-    
-    for i, (text, embedding) in enumerate(zip(documents, embeddings)):
-        db.add(text, embedding)
-    
-    print(f"已存储 {db.count()} 条文档")
-    
-    # 用户提问
-    query = "什么是深度学习？"
-    print(f"\n[3/4] 用户提问: {query}")
-    
-    # 将问题转换为向量
-    query_embedding = model.encode(query)
-    
-    # 搜索相关文档
-    print("[4/4] 搜索相关文档...")
-    results = db.search(query_embedding, top_k=3)
-    
-    # 显示结果
-    print("\n" + "-" * 40)
-    print("检索到的相关文档：")
-    print("-" * 40)
-    
-    for i, (id, text, score) in enumerate(results):
-        print(f"\n[{i+1}] 相似度: {score:.4f}")
-        print(f"    {text[:80]}...")
-    
-    # 模拟生成答案（实际应用中调用大模型）
-    print("\n" + "-" * 40)
-    print("模拟生成答案：")
-    print("-" * 40)
-    context = "\n".join([text for _, text, _ in results])
-    print(f"[RAG上下文]\n{context}\n")
-    print("[答案] 深度学习是机器学习的一个子领域，使用多层神经网络来学习数据的复杂模式。")
-    print("常见的深度学习框架有TensorFlow和PyTorch，应用包括图像识别、语音识别等。")
+    print(f"\n{'=' * 60}")
+    print(f"💬  步骤 6: 生成回答 (Generation)")
+    print(f"{'=' * 60}")
+
+    # 1. 检索
+    query_vec = model.encode(query)
+    results = vector_db.search(query_vec, top_k=top_k)
+
+    # 2. 构建上下文
+    context_parts = []
+    for rank, (doc_id, text, score) in enumerate(results, 1):
+        context_parts.append(f"[参考 {rank}] {text}")
+    context = "\n\n".join(context_parts)
+
+    print(f"\n  ❓ 查询: {query}")
+    print(f"\n  📋 检索到的上下文 ({len(results)} 条):")
+    for rank, (doc_id, text, score) in enumerate(results, 1):
+        preview = text[:100].replace("\n", " ")
+        print(f"     [{rank}] (score={score:.4f}) {preview}...")
+
+    # 3. 模拟生成回答
+    #    在实际 RAG 系统中，这里会调用 LLM:
+    #       response = llm.chat(f"基于以下信息回答问题:\n{context}\n\n问题: {query}")
+    response = _simulate_answer(query, context)
+
+    print(f"\n  🤖 生成回答:")
+    print(f"     {response}")
+    print(f"\n  ℹ️  (以上是模拟回答。实际 RAG 会调用 LLM 基于检索到的上下文生成。)")
+
+    return response
 
 
-def demo_with_chromadb(documents: list):
+def _simulate_answer(query: str, context: str) -> str:
     """
-    使用ChromaDB的RAG演示
-    
-    ChromaDB会自动处理embedding转换
+    模拟 LLM 生成回答
+
+    在一个真实的 RAG 系统中，这里会调用:
+        anthropic.Anthropic().messages.create(...)   # Claude
+        openai.ChatCompletion.create(...)             # GPT
+        或其他 LLM API
+
+    这里的实现只是从上下文中提取关键信息进行展示。
     """
-    print_separator("ChromaDB RAG 演示")
-    
-    # 创建ChromaDB实例
-    db = ChromaDBDemo("rag_knowledge_base")
-    
-    # 添加文档（ChromaDB自动处理embedding）
-    print("\n[1/3] 添加文档到ChromaDB...")
-    db.add_documents(documents)
-    
-    # 搜索相关文档
-    query = "机器学习有哪些算法？"
-    print(f"\n[2/3] 用户提问: {query}")
-    
-    print("[3/3] 搜索相关文档...")
-    results = db.search(query, top_k=3)
-    
-    # 显示结果
-    print("\n" + "-" * 40)
-    print("检索到的相关文档：")
-    print("-" * 40)
-    
-    for i, result in enumerate(results):
-        print(f"\n[{i+1}] 距离: {result['distance']:.4f}")
-        print(f"    {result['text'][:80]}...")
+    # 简单地从前 200 个字符中提取回答
+    snippet = context[:200].strip()
+    return f"根据检索到的资料:\n「{snippet}」\n\n实际使用时，可以将这些检索到的上下文拼接成 prompt，调用 LLM 生成最终回答。"
 
 
-def demo_with_faiss(documents: list):
+# ═══════════════════════════════════════════════════════════════
+#  扩展实验: 不同 chunk 参数对比
+# ═══════════════════════════════════════════════════════════════
+
+def experiment_chunk_size(documents):
     """
-    使用FAISS的RAG演示
-    
-    FAISS性能最高，适合大规模数据
+    🧪 实验: 不同 chunk_size 对检索效果的影响
+
+    尝试不同的参数组合，观察:
+    - 小 chunk (256):  精确定位，但可能缺失上下文
+    - 大 chunk (1024): 上下文完整，但检索噪音多
     """
-    print_separator("FAISS RAG 演示")
-    
-    # 创建FAISS实例
-    db = FAISSDemo(dimension=384, index_type="flat")
-    
-    # 添加文档
-    print("\n[1/3] 添加文档到FAISS...")
-    db.add_documents(documents)
-    
-    # 搜索相关文档
-    query = "什么是向量数据库？"
-    print(f"\n[2/3] 用户提问: {query}")
-    
-    print("[3/3] 搜索相关文档...")
-    results = db.search(query, top_k=3)
-    
-    # 显示结果
-    print("\n" + "-" * 40)
-    print("检索到的相关文档：")
-    print("-" * 40)
-    
-    for i, result in enumerate(results):
-        print(f"\n[{i+1}] 距离: {result['distance']:.4f}")
-        print(f"    {result['text'][:80]}...")
+    print("\n\n" + "=" * 60)
+    print("🧪  实验: 不同 chunk_size 对比")
+    print("=" * 60)
+
+    configs = [
+        {"chunk_size": 256, "chunk_overlap": 64,  "desc": "小块 + 小重叠"},
+        {"chunk_size": 512, "chunk_overlap": 128, "desc": "中块 + 中等重叠 ✓ 推荐"},
+        {"chunk_size": 1024, "chunk_overlap": 128, "desc": "大块 + 固定重叠"},
+    ]
+
+    all_text = documents[0]["content"] if documents else ""
+
+    print(f"\n📄 使用文档: {documents[0]['filename'] if documents else 'N/A'}")
+    print(f"   原文长度: {len(all_text):,} 字符\n")
+
+    for cfg in configs:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=cfg["chunk_size"],
+            chunk_overlap=cfg["chunk_overlap"],
+        )
+        chunks = splitter.split_text(all_text)
+        sizes = [len(c) for c in chunks]
+
+        print(f"  {cfg['desc']}:")
+        print(f"    chunk_size={cfg['chunk_size']}, overlap={cfg['chunk_overlap']}")
+        print(f"    → {len(chunks):>3} 个块, 平均 {sum(sizes)/len(sizes):.0f} 字符/块")
+        print()
 
 
-def compare_search_speed():
-    """
-    对比三种数据库的搜索速度
-    
-    注意：这只是简单对比，实际性能取决于很多因素
-    """
-    print_separator("搜索速度对比")
-    
-    import time  # 时间库，用于计时
-    import numpy as np
-    
-    # 准备测试数据
-    num_vectors = 1000  # 测试1000个向量
-    dimension = 384
-    
-    print(f"\n测试规模: {num_vectors} 个向量，维度 {dimension}")
-    
-    # 生成随机向量
-    vectors = np.random.rand(num_vectors, dimension).astype(np.float32)
-    query_vector = np.random.rand(1, dimension).astype(np.float32)
-    
-    # 测试简易数据库
-    simple_db = SimpleVectorDB()
-    for i, vec in enumerate(vectors):
-        simple_db.add(f"doc_{i}", vec)
-    
-    start = time.time()
-    for _ in range(100):  # 搜索100次
-        simple_db.search(query_vector[0], top_k=5)
-    simple_time = (time.time() - start) / 100
-    
-    # 测试FAISS
-    import faiss
-    faiss_index = faiss.IndexFlatL2(dimension)
-    faiss_index.add(vectors)
-    
-    start = time.time()
-    for _ in range(100):
-        faiss_index.search(query_vector, 5)
-    faiss_time = (time.time() - start) / 100
-    
-    # 显示结果
-    print(f"\n搜索100次平均耗时：")
-    print(f"  简易数据库: {simple_time*1000:.2f} ms")
-    print(f"  FAISS:      {faiss_time*1000:.2f} ms")
-    print(f"\nFAISS比简易数据库快: {simple_time/faiss_time:.1f} 倍")
-
+# ═══════════════════════════════════════════════════════════════
+#  主流程
+# ═══════════════════════════════════════════════════════════════
 
 def main():
     """
-    主函数：运行所有演示
+    完整 RAG 流程
+
+    执行顺序:
+        📂 加载 → ✂️ 切分 → 🔢 嵌入 → 💾 存储 → 🔍 检索 → 💬 生成
     """
-    print("\n" + "🎓" * 30)
-    print("\n    RAG (检索增强生成) 学习演示")
-    print("\n" + "🎓" * 30)
-    
-    # 加载示例文档
-    print("\n正在加载示例文档...")
-    documents = load_sample_documents()
-    print(f"共加载 {len(documents)} 条文档")
-    
-    # 演示1：简易向量数据库
-    demo_with_simple_db(documents)
-    
-    # 演示2：ChromaDB
-    demo_with_chromadb(documents)
-    
-    # 演示3：FAISS
-    demo_with_faiss(documents)
-    
-    # 演示4：速度对比
-    compare_search_speed()
-    
-    # 总结
-    print_separator("学习总结")
+    print("=" * 60)
+    print("🦜  RAG (检索增强生成) 学习演示")
+    print("     Retrieval-Augmented Generation Demo")
+    print("=" * 60)
+
+    # ════════════════════════════════════════════
+    #  步骤 1: 数据加载
+    # ════════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("📂  步骤 1: 加载 data/ 目录下的 .md 文件")
+    print("=" * 60)
+
+    loader = MarkdownLoader(data_dir="data")
+    documents = loader.load_all()
+    MarkdownLoader.print_summary(documents)
+
+    if not documents:
+        print("\n❌  没有找到文档。请将 .md 文件放入 data/ 目录后重试。")
+        print("    data/ 目录已存在，可以直接放入您的知识库文件。")
+        return
+
+    # ════════════════════════════════════════════
+    #  步骤 2: 文本切分
+    # ════════════════════════════════════════════
+    all_chunks = step2_split_documents(documents)
+
+    # ════════════════════════════════════════════
+    #  加载嵌入模型 (步骤 3-5 共用)
+    # ════════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("🤖  加载嵌入模型")
+    print("=" * 60)
     print("""
-📚 向量数据库核心概念：
+    模型: paraphrase-multilingual-MiniLM-L12-v2
+     - 多语言支持 (含中文)
+     - 输出 384 维向量
+     - MiniLM 架构，速度快
+""")
 
-1. 向量化（Embedding）
-   - 将文本转换为数字向量（一串数字）
-   - 相似文本的向量在空间中距离近
-   
-2. 索引（Index）
-   - 加速搜索的数据结构
-   - 常见类型：暴力搜索、倒排索引、HNSW图索引
-   
-3. 相似度搜索
-   - 找到与查询向量最相似的向量
-   - 常用度量：余弦相似度、欧几里得距离
+    model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
 
-📊 三种数据库对比：
+    # ════════════════════════════════════════════
+    #  步骤 3-5: 嵌入 → 存储 → 检索
+    # ════════════════════════════════════════════
+    vector_db, texts, sources = step3_5_embed_and_search(all_chunks, model)
 
-┌─────────────┬──────────────────────────────────────────────┐
-│ ChromaDB    │ 最简单，适合学习和原型开发                     │
-├─────────────┼──────────────────────────────────────────────┤
-│ FAISS       │ 性能最高，适合大规模数据                       │
-├─────────────┼──────────────────────────────────────────────┤
-│ Milvus Lite │ 功能最全，支持过滤查询，适合生产环境           │
-└─────────────┴──────────────────────────────────────────────┘
+    # ════════════════════════════════════════════
+    #  步骤 6: 生成回答 (可选)
+    # ════════════════════════════════════════════
+    print("\n" + "=" * 60)
+    print("💬  步骤 6: 基于检索结果生成回答")
+    print("=" * 60)
 
-💡 下一步学习建议：
+    step6_generate(vector_db, texts, sources, model, "工作流和对话流有什么本质区别？")
 
-1. 尝试修改代码，观察不同的搜索结果
-2. 添加更多文档，测试搜索效果
-3. 尝试不同的embedding模型
-4. 学习如何连接真正的大模型生成答案
+    # ════════════════════════════════════════════
+    #  实验: chunk 参数对比
+    # ════════════════════════════════════════════
+    experiment_chunk_size(documents)
+
+    # ════════════════════════════════════════════
+    #  总结
+    # ════════════════════════════════════════════
+    print("=" * 60)
+    print("✅  RAG 演示完成!")
+    print("=" * 60)
+    print("""
+📚 学习路径建议:
+
+  1. 先理解「切分」— 看 text_splitter.py 的代码和注释
+  2. 尝试修改 chunk_size / chunk_overlap 观察效果
+  3. 将 data/ 目录下的 .md 文件替换成自己的知识库
+  4. 学习其他向量数据库:
+     - chromadb_demo.py  — ChromaDB (纯 Python, 入门友好)
+     - faiss_demo.py     — FAISS (高性能, 适合大规模)
+     - milvus_demo.py    — Milvus (分布式, 生产级)
+  5. 接入真实 LLM (如 Claude API) 替代模拟回答
+
+🔧 参数调优建议:
+  - 技术文档/QA:    chunk_size=512, overlap=128
+  - 长篇文章:        chunk_size=1024, overlap=256
+  - 代码文档:         chunk_size=256, overlap=64
+  - 对话/短文本:      chunk_size=256, overlap=0-32
+
+📂 项目文件说明:
+  - data_loader.py    — 从 data/ 读取 .md 文件
+  - text_splitter.py  — 递归字符分割器 (核心学习文件)
+  - simple_vector_db.py — 手写向量数据库 (教学用)
+  - chromadb_demo.py    — ChromaDB 示例
+  - faiss_demo.py       — FAISS 示例
+  - milvus_demo.py      — Milvus Lite 示例
 """)
 
 
-# 程序入口
 if __name__ == "__main__":
     main()
